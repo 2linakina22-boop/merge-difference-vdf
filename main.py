@@ -1,15 +1,9 @@
 import os
 
-# 块类型常量定义
-COMMENT_BLOCK = "comment"
-SECTION_BLOCK = "section"
-KEY_VALUE_BLOCK = "key_value"
-
 
 def read_vdf_file(file_path):
-    """读取VDF文件并调用解析函数"""
     if not os.path.exists(file_path):
-        raise FileNotFoundError(f"文件不存在: {file_path}")
+        raise FileNotFoundError("File not found: " + str(file_path))
 
     with open(file_path, 'r', encoding='utf-8') as f:
         content = f.read()
@@ -18,324 +12,323 @@ def read_vdf_file(file_path):
 
 
 def parse_vdf_content(content, file_name="unknown"):
-    """
-    解析VDF内容，为每个独立注释标记章节归属
-    - 确保后续合并时能按原章节位置放置
-    """
-    parsed_result = {
-        "blocks": [],  # 有序块列表（保留原始顺序）
-        "data": {},  # 章节-键值对数据
-        "section_order": [],  # 章节顺序
-        "key_order": {},  # 章节内键顺序
-        "line_comments": {}  # 键值对行内注释
-    }
+    result = {}
+    section_order = []
+    key_order = {}
+    line_comments = {}
 
-    current_section = None  # 当前活跃章节
-    prev_section = None  # 前一个章节（用于标记章节间注释归属）
-    temp_comment_lines = []  # 临时存储连续注释行
+    section_content = {}
+    section_key_value_lines = {}
+    section_non_key_value_lines = {}
+
+    standalone_comments = []
+
+    current_section = None
+    current_section_lines = []
 
     lines = content.split('\n')
+    for i, line in enumerate(lines):
+        try:
+            original_line = line.rstrip()
+            stripped_line = line.strip()
+
+            if stripped_line.startswith('[') and stripped_line.endswith(']'):
+                if current_section is not None:
+                    section_content[current_section] = current_section_lines.copy()
+                    kv_lines, non_kv_lines = separate_key_value_lines(current_section_lines)
+                    section_key_value_lines[current_section] = kv_lines
+                    section_non_key_value_lines[current_section] = non_kv_lines
+
+                section_name = stripped_line[1:-1].strip()
+                current_section = section_name
+
+                if section_name not in result:
+                    result[section_name] = {}
+                    key_order[section_name] = []
+                    section_order.append(section_name)
+
+                current_section_lines = []
+                continue
+
+            if current_section is None:
+                standalone_comments.append(original_line)
+            else:
+                current_section_lines.append(original_line)
+
+                if '=' in stripped_line and not stripped_line.startswith(';'):
+                    line_parts = stripped_line.split(';', 1)
+                    main_part = line_parts[0].strip()
+                    comment_part = ';' + line_parts[1] if len(line_parts) > 1 else ''
+
+                    parts = main_part.split('=', 1)
+                    if len(parts) == 2:
+                        key = parts[0].strip()
+                        value = parts[1].strip()
+                        result[current_section][key] = value
+
+                        if key not in key_order[current_section]:
+                            key_order[current_section].append(key)
+
+                        if comment_part:
+                            comment_key = current_section + "." + key
+                            line_comments[comment_key] = comment_part
+
+        except Exception as e:
+            raise
+
+    if current_section is not None:
+        section_content[current_section] = current_section_lines
+        kv_lines, non_kv_lines = separate_key_value_lines(current_section_lines)
+        section_key_value_lines[current_section] = kv_lines
+        section_non_key_value_lines[current_section] = non_kv_lines
+
+    return {
+        'data': result,
+        'section_order': section_order,
+        'key_order': key_order,
+        'line_comments': line_comments,
+        'section_content': section_content,
+        'section_key_value_lines': section_key_value_lines,
+        'section_non_key_value_lines': section_non_key_value_lines,
+        'standalone_comments': standalone_comments,
+        'file_name': file_name
+    }
+
+
+def separate_key_value_lines(lines):
+    kv_lines = []
+    non_kv_lines = []
     for line in lines:
-        original_line = line.rstrip()
-        stripped_line = line.strip()
+        stripped = line.strip()
+        if '=' in stripped and not stripped.startswith(';'):
+            kv_lines.append(line)
+        else:
+            non_kv_lines.append(line)
+    return kv_lines, non_kv_lines
 
-        # 处理独立注释行（空行或;开头）
-        if not stripped_line or stripped_line.startswith(';'):
-            temp_comment_lines.append(original_line)
-            continue
 
-        # 处理暂存的注释块（非注释行出现时）
-        if temp_comment_lines:
-            # 确定注释归属章节
-            comment_belong_to = current_section if current_section else prev_section
-            parsed_result["blocks"].append({
-                "type": COMMENT_BLOCK,
-                "content": temp_comment_lines.copy(),
-                "belong_to_section": comment_belong_to
-            })
-            temp_comment_lines.clear()
+def is_key_value_line(line):
+    if not line:
+        return False
+    stripped = line.strip()
+    return '=' in stripped and not stripped.startswith(';')
 
-        # 解析章节块
-        if stripped_line.startswith('[') and stripped_line.endswith(']'):
-            section_name = stripped_line[1:-1].strip()
-            prev_section = current_section
-            current_section = section_name
 
-            if section_name not in parsed_result["data"]:
-                parsed_result["data"][section_name] = {}
-                parsed_result["key_order"][section_name] = []
-                parsed_result["section_order"].append(section_name)
+def extract_key_from_line(line):
+    if not line:
+        return None
+    stripped = line.strip()
+    if '=' in stripped and not stripped.startswith(';'):
+        parts = stripped.split('=', 1)
+        if len(parts) >= 1:
+            return parts[0].strip()
+    return None
 
-            parsed_result["blocks"].append({
-                "type": SECTION_BLOCK,
-                "name": section_name,
-                "content": original_line,
-                "belong_to_section": section_name
-            })
-            continue
 
-        # 解析键值对块
-        if '=' in stripped_line and current_section is not None:
-            line_parts = stripped_line.split(';', 1)
-            main_part = line_parts[0].strip()
-            inline_comment = ';' + line_parts[1] if len(line_parts) > 1 else ''
-
-            key_val = main_part.split('=', 1)
-            if len(key_val) == 2:
-                key = key_val[0].strip()
-                value = key_val[1].strip()
-
-                parsed_result["data"][current_section][key] = value
-                if key not in parsed_result["key_order"][current_section]:
-                    parsed_result["key_order"][current_section].append(key)
-                if inline_comment:
-                    parsed_result["line_comments"][f"{current_section}.{key}"] = inline_comment
-
-                parsed_result["blocks"].append({
-                    "type": KEY_VALUE_BLOCK,
-                    "section": current_section,
-                    "key": key,
-                    "value": value,
-                    "inline_comment": inline_comment,
-                    "content": original_line,
-                    "belong_to_section": current_section
-                })
-            continue
-
-        # 处理未知内容（归为独立注释）
-        comment_belong_to = current_section if current_section else prev_section
-        parsed_result["blocks"].append({
-            "type": COMMENT_BLOCK,
-            "content": [original_line],
-            "belong_to_section": comment_belong_to
-        })
-
-    # 处理文件末尾的注释块
-    if temp_comment_lines:
-        comment_belong_to = current_section if current_section else prev_section
-        parsed_result["blocks"].append({
-            "type": COMMENT_BLOCK,
-            "content": temp_comment_lines,
-            "belong_to_section": comment_belong_to
-        })
-
-    parsed_result["file_name"] = file_name
-    return parsed_result
+def print_vdf_section_details(vdf_parsed, vdf_name):
+    pass
 
 
 def generate_vdf_content(parsed_data):
-    """根据块列表生成VDF内容"""
-    output_lines = []
-    for block in parsed_data["blocks"]:
-        if isinstance(block["content"], list):
-            output_lines.extend(block["content"])
-        else:
-            output_lines.append(block["content"])
+    section_order = parsed_data['section_order']
+    section_content = parsed_data.get('section_content', {})
+    standalone_comments = parsed_data.get('standalone_comments', [])
 
-    # 去除末尾多余空行
-    while output_lines and not output_lines[-1].strip():
-        output_lines.pop()
+    lines = []
+    for line in standalone_comments:
+        lines.append(line)
 
-    return '\n'.join(output_lines)
+    for section in section_order:
+        lines.append('[' + section + ']')
+        if section in section_content:
+            for content_line in section_content[section]:
+                lines.append(content_line)
+
+    return '\n'.join(lines)
 
 
 def get_value_component_count(value):
-    """计算键值按逗号分割的组成部分数量"""
-    components = [comp.strip() for comp in value.split(',') if comp.strip()]
+    if not value:
+        return 0
+    components = [comp.strip() for comp in value.split(',')]
+    components = [comp for comp in components if comp]
     return len(components)
 
 
+def merge_values_by_count(v1_val, v2_val):
+    """Use v1 value if component counts counts differ; use v2 if counts are equal"""
+    if not v1_val:
+        return v2_val
+    if not v2_val:
+        return v1_val
+    v1_count = get_value_component_count(v1_val)
+    v2_count = get_value_component_count(v2_val)
+    return v1_val if v1_count != v2_count else v2_val
+
+
 def merge_vdf_data(vdf1_parsed, vdf2_parsed):
-    """
-    合并两个VDF解析结果
-    核心：vdf1的独立注释按原章节归属位置合并
-    """
-    # 1. 按章节归属分组vdf1的独立注释
-    v1_comments_by_section = {}
-    for block in vdf1_parsed["blocks"]:
-        if block["type"] == COMMENT_BLOCK:
-            belong_section = block["belong_to_section"]
-            if belong_section not in v1_comments_by_section:
-                v1_comments_by_section[belong_section] = []
-            v1_comments_by_section[belong_section].append(block)
+    try:
+        v1_data = vdf1_parsed['data']
+        v2_data = vdf2_parsed['data']
+        v1_comments = vdf1_parsed.get('line_comments', {})
+        v2_comments = vdf2_parsed.get('line_comments', {})
 
-    # 2. 以vdf2的块列表为基础框架
-    merged_blocks = vdf2_parsed["blocks"].copy()
-    v2_sections = set(vdf2_parsed["section_order"])
-    v1_sections = set(vdf1_parsed["section_order"])
-    all_sections = v2_sections | v1_sections
+        v1_content = vdf1_parsed.get('section_content', {})
+        v2_content = vdf2_parsed.get('section_content', {})
 
-    # 3. 为每个章节插入对应归属的v1注释
-    for target_section in all_sections:
-        v1_target_comments = v1_comments_by_section.get(target_section, [])
-        if not v1_target_comments:
-            continue
+        # Get all sections from both VDF files
+        v1_sections = set(vdf1_parsed['section_order'])
+        v2_sections = set(vdf2_parsed['section_order'])
 
-        # 定位章节在vdf2中的位置区域
-        section_start_idx = None
-        section_end_idx = len(merged_blocks)
+        # Determine merged section order, using v1's order as base
+        merged_section_order = []
+        # First add sections present in v1
+        for section in vdf1_parsed['section_order']:
+            merged_section_order.append(section)
 
-        for i, block in enumerate(merged_blocks):
-            if block["type"] == SECTION_BLOCK and block["name"] == target_section:
-                section_start_idx = i
-            elif section_start_idx is not None and block["type"] == SECTION_BLOCK:
-                section_end_idx = i
-                break
+        # Add v2 unique sections in appropriate position
+        v2_unique_sections = v2_sections - v1_sections
+        for section in v2_unique_sections:
+            # Find insertion position based on alphabetical order
+            insert_pos = len(merged_section_order)
+            for i, v1_section in enumerate(vdf1_parsed['section_order']):
+                if section < v1_section:
+                    insert_pos = i
+                    break
+            merged_section_order.insert(insert_pos, section)
 
-        # 处理v1独有的章节（v2中不存在的章节）
-        if section_start_idx is None:
-            for comment_block in v1_target_comments:
-                merged_blocks.append(comment_block)
-            continue
+        merged_data = {}
+        merged_key_order = {}
+        merged_line_comments = {}
+        merged_section_content = {}
 
-        # 去重并插入注释到章节区域内
-        v2_existing_comments = set()
-        for i in range(section_start_idx, section_end_idx):
-            block = merged_blocks[i]
-            if block["type"] == COMMENT_BLOCK:
-                v2_existing_comments.add(hash('\n'.join(block["content"])))
+        merged_standalone_comments = vdf2_parsed.get('standalone_comments', []).copy()
 
-        inserted_count = 0
-        for comment_block in v1_target_comments:
-            comment_hash = hash('\n'.join(comment_block["content"]))
-            if comment_hash not in v2_existing_comments:
-                insert_pos = section_start_idx + 1 + inserted_count
-                merged_blocks.insert(insert_pos, comment_block)
-                inserted_count += 1
-                section_end_idx += 1
-
-    # 4. 处理全局注释（归属为None）
-    v1_global_comments = v1_comments_by_section.get(None, [])
-    if v1_global_comments:
-        v2_global_comments = set()
-        for block in merged_blocks:
-            if block["type"] == COMMENT_BLOCK and block["belong_to_section"] is None:
-                v2_global_comments.add(hash('\n'.join(block["content"])))
-
-        global_insert_pos = 0
-        for comment_block in v1_global_comments:
-            comment_hash = hash('\n'.join(block["content"]))
-            if comment_hash not in v2_global_comments:
-                merged_blocks.insert(global_insert_pos, comment_block)
-                global_insert_pos += 1
-
-    # 5. 合并键值对
-    merged_data = vdf2_parsed["data"].copy()
-    for section in all_sections:
-        if section not in merged_data:
+        # Process all sections
+        for section in merged_section_order:
             merged_data[section] = {}
+            merged_key_order[section] = []
+            merged_section_content[section] = []
 
-        v1_section_data = vdf1_parsed["data"].get(section, {})
-        v2_section_data = merged_data.get(section, {})
-        for key in v1_section_data.keys() | v2_section_data.keys():
-            v1_val = v1_section_data.get(key)
-            v2_val = v2_section_data.get(key)
+            v1_has_section = section in v1_content
+            v2_has_section = section in v2_content
 
-            if v1_val and v2_val:
-                v1_count = get_value_component_count(v1_val)
-                v2_count = get_value_component_count(v2_val)
-                merged_data[section][key] = v1_val if v1_count > v2_count else v2_val
-            elif v1_val:
-                merged_data[section][key] = v1_val
+            # Create mapping of v2 key-value lines
+            v2_kv_map = {}
+            if v2_has_section:
+                for line in v2_content[section]:
+                    if is_key_value_line(line):
+                        key = extract_key_from_line(line)
+                        if key:
+                            v2_kv_map[key] = line
 
-            # 合并行内注释（v1优先）
-            v1_inline_comm = vdf1_parsed["line_comments"].get(f"{section}.{key}")
-            if v1_inline_comm:
-                vdf2_parsed["line_comments"][f"{section}.{key}"] = v1_inline_comm
+            # Build content following v1's line order, preserving non-key-value lines
+            if v1_has_section:
+                for line in v1_content[section]:
+                    if is_key_value_line(line):
+                        key = extract_key_from_line(line)
+                        if key:
+                            if key in v2_kv_map:
+                                # Same key, apply value comparison strategy
+                                v1_val = v1_data[section][key]
+                                v2_val = v2_data[section][key]
+                                final_val = merge_values_by_count(v1_val, v2_val)
 
-    # 6. 补充v1独有的章节和键值对
-    v1_unique_sections = v1_sections - v2_sections
-    for section in v1_unique_sections:
-        # 添加章节块
-        has_section_block = any(
-            b["type"] == SECTION_BLOCK and b["name"] == section
-            for b in merged_blocks
-        )
-        if not has_section_block:
-            merged_blocks.append({
-                "type": SECTION_BLOCK,
-                "name": section,
-                "content": f"[{section}]",
-                "belong_to_section": section
-            })
+                                comment_key = section + "." + key
+                                final_comment = v1_comments.get(comment_key, v2_comments.get(comment_key, ''))
+                                merged_line = key + " = " + final_val + final_comment
 
-        # 添加键值对
-        for key in vdf1_parsed["key_order"][section]:
-            val = merged_data[section][key]
-            inline_comm = vdf2_parsed["line_comments"].get(f"{section}.{key}", "")
-            merged_blocks.append({
-                "type": KEY_VALUE_BLOCK,
-                "section": section,
-                "key": key,
-                "value": val,
-                "inline_comment": inline_comm,
-                "content": f"{key} = {val}{inline_comm}",
-                "belong_to_section": section
-            })
+                                merged_section_content[section].append(merged_line)
+                                merged_data[section][key] = final_val
+                                merged_key_order[section].append(key)
+                                merged_line_comments[comment_key] = final_comment
 
-    # 整理元数据
-    merged_section_order = vdf2_parsed["section_order"].copy()
-    merged_section_order.extend(v1_unique_sections)
+                                # Remove processed key from v2 mapping
+                                del v2_kv_map[key]
+                            else:
+                                # Key unique to v1, keep as is
+                                merged_section_content[section].append(line)
+                                merged_data[section][key] = v1_data[section][key]
+                                merged_key_order[section].append(key)
+                                cmt_key = section + "." + key
+                                if cmt_key in v1_comments:
+                                    merged_line_comments[cmt_key] = v1_comments[cmt_key]
+                    else:
+                        # Keep non-key-value lines as is
+                        merged_section_content[section].append(line)
 
-    merged_key_order = vdf2_parsed["key_order"].copy()
-    for section in v1_unique_sections:
-        merged_key_order[section] = vdf1_parsed["key_order"][section].copy()
-    for section in v2_sections & v1_sections:
-        for key in vdf1_parsed["key_order"][section]:
-            if key not in merged_key_order[section]:
-                merged_key_order[section].append(key)
+            # Add key-value lines unique to v2 (not present in v1)
+            if v2_has_section:
+                for key, line in v2_kv_map.items():
+                    if key not in merged_data[section]:
+                        merged_section_content[section].append(line)
+                        merged_data[section][key] = v2_data[section][key]
+                        merged_key_order[section].append(key)
+                        comment_key = section + "." + key
+                        merged_line_comments[comment_key] = v2_comments.get(comment_key, '')
 
-    return {
-        "blocks": merged_blocks,
-        "data": merged_data,
-        "section_order": merged_section_order,
-        "key_order": merged_key_order,
-        "line_comments": vdf2_parsed["line_comments"],
-        "file_name": f"merged_{vdf1_parsed['file_name']}_{vdf2_parsed['file_name']}"
-    }
+        # Separate key-value lines and non-key-value lines (for compatibility)
+        merged_kv_lines = {}
+        merged_non_kv_lines = {}
+        for section in merged_section_order:
+            kv, non_kv = separate_key_value_lines(merged_section_content[section])
+            merged_kv_lines[section] = kv
+            merged_non_kv_lines[section] = non_kv
+
+        return {
+            'data': merged_data,
+            'section_order': merged_section_order,
+            'key_order': merged_key_order,
+            'line_comments': merged_line_comments,
+            'section_content': merged_section_content,
+            'section_key_value_lines': merged_kv_lines,
+            'section_non_key_value_lines': merged_non_kv_lines,
+            'standalone_comments': merged_standalone_comments
+        }
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise
 
 
 def save_vdf_file(parsed_data, output_path):
-    """保存合并后的VDF文件"""
-    vdf_content = generate_vdf_content(parsed_data)
+    content = generate_vdf_content(parsed_data)
     with open(output_path, 'w', encoding='utf-8') as f:
-        f.write(vdf_content)
-    print(f"合并文件已保存至：{output_path}")
+        f.write(content)
+
+
+def print_key_value_counts(vdf_parsed, vdf_name):
+    """Print the count of value components for each key"""
+    pass
 
 
 def main():
-    """主函数：执行VDF合并流程"""
-    # 配置文件路径
     vdf1_path = "config1.vdf"
     vdf2_path = "config2.vdf"
     output_path = "merged_config.vdf"
 
     try:
-        # 读取解析文件
-        print(f"正在读取：{vdf1_path}（保留注释章节位置）")
-        vdf1 = read_vdf_file(vdf1_path)
-        v1_comment_count = sum(1 for b in vdf1["blocks"] if b["type"] == COMMENT_BLOCK)
-        print(f"vdf1 独立注释块数量：{v1_comment_count}")
+        vdf1_parsed = read_vdf_file(vdf1_path)
+        vdf2_parsed = read_vdf_file(vdf2_path)
 
-        print(f"\n正在读取：{vdf2_path}（键值基础文件）")
-        vdf2 = read_vdf_file(vdf2_path)
-        v2_comment_count = sum(1 for b in vdf2["blocks"] if b["type"] == COMMENT_BLOCK)
-        print(f"vdf2 独立注释块数量：{v2_comment_count}")
+        print_vdf_section_details(vdf1_parsed, "vdf1")
+        print_vdf_section_details(vdf2_parsed, "vdf2")
 
-        # 合并数据
-        print("\n正在合并VDF数据...")
-        merged = merge_vdf_data(vdf1, vdf2)
-        merged_comment_count = sum(1 for b in merged["blocks"] if b["type"] == COMMENT_BLOCK)
-        print(f"合并后独立注释块数量：{merged_comment_count}")
+        # Print value component counts for each key
+        print_key_value_counts(vdf1_parsed, "vdf1")
+        print_key_value_counts(vdf2_parsed, "vdf2")
 
-        # 保存结果
-        save_vdf_file(merged, output_path)
-        print("\n合并完成！")
+        merged_parsed = merge_vdf_data(vdf1_parsed, vdf2_parsed)
+
+        print_vdf_section_details(merged_parsed, "Merged VDF")
+        save_vdf_file(merged_parsed, output_path)
 
     except FileNotFoundError as e:
-        print(f"\n错误：{e}")
+        pass
     except Exception as e:
-        print(f"\n处理错误：{str(e)}")
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == "__main__":
